@@ -33,7 +33,7 @@ use wezterm_term::{
     Clipboard, ClipboardReadCallback, ClipboardSelection, DownloadHandler, TerminalSize,
 };
 #[cfg(windows)]
-use winapi::um::winsock2::{SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
+use windows_sys::Win32::Networking::WinSock::{SOL_SOCKET, SO_RCVBUF, SO_SNDBUF};
 
 pub mod activity;
 pub mod client;
