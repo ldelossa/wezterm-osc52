@@ -932,6 +932,7 @@ pub struct LivenessResponse {
 pub struct GetPaneRenderChangesResponse {
     pub pane_id: PaneId,
     pub mouse_grabbed: bool,
+    pub alt_screen_active: bool,
     pub cursor_position: StableCursorPosition,
     pub dimensions: RenderableDimensions,
     pub dirty_lines: Vec<Range<StableRowIndex>>,
