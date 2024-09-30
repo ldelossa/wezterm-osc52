@@ -20,6 +20,7 @@ use ratelim::RateLimiter;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use termwiz::input::KeyEvent;
 use termwiz::surface::SequenceNo;
@@ -27,8 +28,8 @@ use url::Url;
 use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{
-    Alert, Clipboard, KeyCode, KeyModifiers, Line, MouseEvent, Progress, StableRowIndex,
-    TerminalConfiguration, TerminalSize,
+    Alert, Clipboard, ClipboardReadCallback, KeyCode, KeyModifiers, Line, MouseEvent, Progress,
+    StableRowIndex, TerminalConfiguration, TerminalSize,
 };
 
 pub struct ClientPane {
@@ -49,6 +50,47 @@ pub struct ClientPane {
     config: Mutex<Option<Arc<dyn TerminalConfiguration>>>,
     unseen_output: Mutex<bool>,
     progress: Mutex<Progress>,
+}
+
+struct ClientClipboardReadCallback {
+    client: Arc<ClientInner>,
+    pane_id: PaneId,
+    query_id: u64,
+    completed: AtomicBool,
+}
+
+impl std::fmt::Debug for ClientClipboardReadCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientClipboardReadCallback")
+            .field("pane_id", &self.pane_id)
+            .field("query_id", &self.query_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClipboardReadCallback for ClientClipboardReadCallback {
+    fn complete(&self, content: Option<String>) {
+        if self.completed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let client = Arc::clone(&self.client);
+        let pane_id = self.pane_id;
+        let query_id = self.query_id;
+        promise::spawn::spawn(async move {
+            if let Err(err) = client
+                .client
+                .send_pdu(Pdu::QueryClipboardResponse(QueryClipboardResponse {
+                    pane_id,
+                    query_id,
+                    content,
+                }))
+                .await
+            {
+                log::error!("failed to return clipboard query {query_id}: {err:#}");
+            }
+        })
+        .detach();
+    }
 }
 
 impl ClientPane {
@@ -168,6 +210,40 @@ impl ClientPane {
                     log::error!("ClientPane: Ignoring SetClipboard request {:?}", clipboard);
                 }
             },
+            Pdu::QueryClipboard(QueryClipboard {
+                pane_id,
+                selection,
+                query_id,
+            }) => {
+                log::debug!(
+                    "Pdu::QueryClipboard query={} pane={:?} local={} remote={} {:?}",
+                    query_id,
+                    pane_id,
+                    self.local_pane_id,
+                    self.remote_pane_id,
+                    selection,
+                );
+                let callback: Arc<dyn ClipboardReadCallback> =
+                    Arc::new(ClientClipboardReadCallback {
+                        client: Arc::clone(&self.client),
+                        pane_id: self.remote_pane_id,
+                        query_id,
+                        completed: AtomicBool::new(false),
+                    });
+                let clipboard = self.clipboard.lock().clone();
+                match clipboard {
+                    Some(clip) => {
+                        if let Err(err) = clip.get_contents(selection, Arc::clone(&callback)) {
+                            log::error!("failed to read clipboard for query {query_id}: {err:#}");
+                            callback.complete(None);
+                        }
+                    }
+                    None => {
+                        log::error!("ClientPane: no clipboard for query {query_id}");
+                        callback.complete(None);
+                    }
+                }
+            }
             Pdu::SetPalette(SetPalette { palette, .. }) => {
                 *self.application_palette.lock() = palette != *self.configured_palette.lock();
 

@@ -11,10 +11,11 @@ use mux::{Mux, MuxNotification};
 use promise::spawn::spawn_into_main_thread;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use termwiz::surface::SequenceNo;
 use url::Url;
 use wezterm_term::terminal::Alert;
+use wezterm_term::ClipboardReadCallback;
 use wezterm_term::StableRowIndex;
 
 #[derive(Clone)]
@@ -196,15 +197,34 @@ fn maybe_push_pane_changes(
     Ok(())
 }
 
+#[derive(Debug)]
+struct PendingClipboardQuery {
+    pane_id: PaneId,
+    callback: Arc<dyn ClipboardReadCallback>,
+}
+
 pub struct SessionHandler {
     to_write_tx: PduSender,
     per_pane: HashMap<TabId, Arc<Mutex<PerPane>>>,
     client_id: Option<Arc<ClientId>>,
     proxy_client_id: Option<ClientId>,
+    pending_clipboard_queries: Arc<Mutex<HashMap<u64, PendingClipboardQuery>>>,
+    next_clipboard_query_id: u64,
 }
 
 impl Drop for SessionHandler {
     fn drop(&mut self) {
+        let pending = self
+            .pending_clipboard_queries
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, pending)| pending.callback)
+            .collect::<Vec<_>>();
+        for callback in pending {
+            callback.complete(None);
+        }
+
         if let Some(client_id) = self.client_id.take() {
             let mux = Mux::get();
             mux.unregister_client(&client_id);
@@ -219,7 +239,50 @@ impl SessionHandler {
             per_pane: HashMap::new(),
             client_id: None,
             proxy_client_id: None,
+            pending_clipboard_queries: Arc::new(Mutex::new(HashMap::new())),
+            next_clipboard_query_id: 1,
         }
+    }
+
+    pub fn should_forward_clipboard_query(&self, pane_id: PaneId) -> bool {
+        let Some(client_id) = &self.client_id else {
+            return false;
+        };
+
+        Mux::get()
+            .iter_clients()
+            .into_iter()
+            .filter(|info| info.focused_pane_id == Some(pane_id))
+            .max_by(|a, b| {
+                a.last_input
+                    .cmp(&b.last_input)
+                    .then_with(|| a.client_id.id.cmp(&b.client_id.id))
+            })
+            .is_some_and(|info| info.client_id.as_ref() == client_id.as_ref())
+    }
+
+    pub fn register_clipboard_query(
+        &mut self,
+        pane_id: PaneId,
+        callback: Arc<dyn ClipboardReadCallback>,
+    ) -> u64 {
+        let query_id = self.next_clipboard_query_id;
+        self.next_clipboard_query_id = self.next_clipboard_query_id.wrapping_add(1).max(1);
+        self.pending_clipboard_queries
+            .lock()
+            .unwrap()
+            .insert(query_id, PendingClipboardQuery { pane_id, callback });
+
+        let pending = Arc::clone(&self.pending_clipboard_queries);
+        promise::spawn::spawn(async move {
+            smol::Timer::after(Duration::from_secs(5)).await;
+            if let Some(pending) = pending.lock().unwrap().remove(&query_id) {
+                pending.callback.complete(None);
+            }
+        })
+        .detach();
+
+        query_id
     }
 
     pub(crate) fn per_pane(&mut self, pane_id: PaneId) -> Arc<Mutex<PerPane>> {
@@ -987,10 +1050,39 @@ impl SessionHandler {
                 .detach();
             }
 
+            Pdu::QueryClipboardResponse(QueryClipboardResponse {
+                pane_id,
+                query_id,
+                content,
+            }) => {
+                let callback = {
+                    let mut pending = self.pending_clipboard_queries.lock().unwrap();
+                    match pending.get(&query_id) {
+                        Some(query) if query.pane_id == pane_id => {
+                            Ok(pending.remove(&query_id).unwrap().callback)
+                        }
+                        Some(query) => Err(anyhow!(
+                            "clipboard query {query_id} belongs to pane {}, not {pane_id}",
+                            query.pane_id
+                        )),
+                        None => Err(anyhow!("unknown or expired clipboard query {query_id}")),
+                    }
+                };
+
+                match callback {
+                    Ok(callback) => {
+                        callback.complete(content);
+                        send_response(Ok(Pdu::UnitResponse(UnitResponse {})));
+                    }
+                    Err(err) => send_response(Err(err)),
+                }
+            }
+
             Pdu::Invalid { .. } => send_response(Err(anyhow!("invalid PDU {:?}", decoded.pdu))),
             Pdu::Pong { .. }
             | Pdu::ListPanesResponse { .. }
             | Pdu::SetClipboard { .. }
+            | Pdu::QueryClipboard { .. }
             | Pdu::NotifyAlert { .. }
             | Pdu::SpawnResponse { .. }
             | Pdu::GetPaneRenderChangesResponse { .. }

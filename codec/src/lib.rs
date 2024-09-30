@@ -441,7 +441,7 @@ macro_rules! pdu {
 /// The overall version of the codec.
 /// This must be bumped when backwards incompatible changes
 /// are made to the types and protocol.
-pub const CODEC_VERSION: usize = 45;
+pub const CODEC_VERSION: usize = 46;
 
 // Defines the Pdu enum.
 // Each struct has an explicit identifying number.
@@ -461,6 +461,8 @@ pdu! {
     SendPaste: 13,
     Resize: 14,
     SetClipboard: 20,
+    QueryClipboard: 21,
+    QueryClipboardResponse: 63,
     GetLines: 22,
     GetLinesResponse: 23,
     GetPaneRenderChanges: 24,
@@ -594,6 +596,7 @@ impl Pdu {
             | Pdu::SetPalette(SetPalette { pane_id, .. })
             | Pdu::NotifyAlert(NotifyAlert { pane_id, .. })
             | Pdu::SetClipboard(SetClipboard { pane_id, .. })
+            | Pdu::QueryClipboard(QueryClipboard { pane_id, .. })
             | Pdu::PaneFocused(PaneFocused { pane_id })
             | Pdu::PaneRemoved(PaneRemoved { pane_id }) => Some(*pane_id),
             _ => None,
@@ -767,6 +770,20 @@ pub struct SetClipboard {
     pub pane_id: PaneId,
     pub clipboard: Option<String>,
     pub selection: ClipboardSelection,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct QueryClipboard {
+    pub pane_id: PaneId,
+    pub selection: ClipboardSelection,
+    pub query_id: u64,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct QueryClipboardResponse {
+    pub pane_id: PaneId,
+    pub query_id: u64,
+    pub content: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]

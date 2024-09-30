@@ -10,6 +10,8 @@ use ordered_float::NotNan;
 use std::fmt::Write;
 use std::io::Write as _;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use termwiz::input::KeyboardEncoding;
 use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
 use url::Url;
@@ -27,6 +29,8 @@ use wezterm_escape_parser::osc::{
 use wezterm_escape_parser::{
     Action, ControlCode, DeviceControlMode, Esc, EscCode, OperatingSystemCommand, CSI,
 };
+
+use super::{ClipboardReadCallback, ThreadedWriter};
 
 /// A helper struct for implementing `vtparse::VTActor` while compartmentalizing
 /// the terminal state and the embedding/host terminal interface
@@ -785,7 +789,27 @@ impl<'a> Performer<'a> {
                 let selection = selection_to_selection(selection);
                 self.set_clipboard_contents(selection, None).ok();
             }
-            OperatingSystemCommand::QuerySelection(_) => {}
+            OperatingSystemCommand::QuerySelection(selection) => {
+                if self.config.enable_osc52_clipboard_reading() {
+                    if let Some(clip) = self.clipboard.as_ref() {
+                        let clipboard = selection_to_selection(selection);
+                        let callback: Arc<dyn ClipboardReadCallback> =
+                            Arc::new(Osc52ResponseSender {
+                                writer: self.writer.get_ref().clone(),
+                                selection,
+                                completed: AtomicBool::new(false),
+                            });
+                        if let Err(err) = clip.get_contents(clipboard, Arc::clone(&callback)) {
+                            error!("failed to get clipboard in response to OSC 52: {:#?}", err);
+                            callback.complete(None);
+                        }
+                    } else {
+                        log::warn!("the clipboard is missing");
+                    }
+                } else {
+                    log::warn!("OSC52 clipboard reading is disabled");
+                }
+            }
             OperatingSystemCommand::SetSelection(selection, selection_data) => {
                 let selection = selection_to_selection(selection);
                 match self.set_clipboard_contents(selection, Some(selection_data)) {
@@ -1105,5 +1129,35 @@ fn selection_to_selection(sel: Selection) -> ClipboardSelection {
         // also use the same fallback configuration as NONE,
         // if/when we add it
         _ => ClipboardSelection::Clipboard,
+    }
+}
+
+/// Wrap clipboard content in an OSC 52 response and send it to the requesting
+/// pane through the terminal writer.
+#[derive(Debug)]
+struct Osc52ResponseSender {
+    writer: ThreadedWriter,
+    selection: Selection,
+    completed: AtomicBool,
+}
+
+impl ClipboardReadCallback for Osc52ResponseSender {
+    fn complete(&self, contents: Option<String>) {
+        if self.completed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // Send the response in one write. Splitting the sequence can cause
+        // applications such as Neovim and micro to misinterpret it.
+        let data = format!(
+            "{}",
+            OperatingSystemCommand::SetSelection(self.selection, contents.unwrap_or_default())
+        );
+        let mut writer = self.writer.clone();
+        if let Err(err) = writer
+            .write_all(data.as_bytes())
+            .and_then(|()| writer.flush())
+        {
+            error!("failed to send OSC 52 clipboard response: {err:#}");
+        }
     }
 }
