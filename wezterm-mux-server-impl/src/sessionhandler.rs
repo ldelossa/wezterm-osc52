@@ -15,8 +15,7 @@ use std::time::{Duration, Instant};
 use termwiz::surface::SequenceNo;
 use url::Url;
 use wezterm_term::terminal::Alert;
-use wezterm_term::ClipboardReadCallback;
-use wezterm_term::StableRowIndex;
+use wezterm_term::{ClipboardReadCallback, StableRowIndex};
 
 #[derive(Clone)]
 pub struct PduSender {
