@@ -1254,6 +1254,49 @@ mod test {
     }
 
     #[test]
+    fn test_clipboard_query_round_trip_preserves_query_id() {
+        let mut encoded = Vec::new();
+        Pdu::QueryClipboard(QueryClipboard {
+            pane_id: 42,
+            selection: ClipboardSelection::Clipboard,
+            query_id: 99,
+        })
+        .encode(&mut encoded, 0)
+        .unwrap();
+        assert_eq!(
+            Pdu::decode(encoded.as_slice()).unwrap(),
+            DecodedPdu {
+                serial: 0,
+                pdu: Pdu::QueryClipboard(QueryClipboard {
+                    pane_id: 42,
+                    selection: ClipboardSelection::Clipboard,
+                    query_id: 99,
+                }),
+            }
+        );
+
+        encoded.clear();
+        Pdu::QueryClipboardResponse(QueryClipboardResponse {
+            pane_id: 42,
+            query_id: 99,
+            content: Some("clipboard".to_string()),
+        })
+        .encode(&mut encoded, 7)
+        .unwrap();
+        assert_eq!(
+            Pdu::decode(encoded.as_slice()).unwrap(),
+            DecodedPdu {
+                serial: 7,
+                pdu: Pdu::QueryClipboardResponse(QueryClipboardResponse {
+                    pane_id: 42,
+                    query_id: 99,
+                    content: Some("clipboard".to_string()),
+                }),
+            }
+        );
+    }
+
+    #[test]
     fn test_pdu_pong() {
         let mut encoded = Vec::new();
         Pdu::Pong(Pong {}).encode(&mut encoded, 0x42).unwrap();

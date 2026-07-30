@@ -1,4 +1,11 @@
-# Wez's Terminal
+# WezTerm OSC52
+
+> [!IMPORTANT]
+> This is an unofficial downstream build of
+> [WezTerm](https://github.com/wezterm/wezterm) that adds opt-in OSC 52
+> clipboard querying. It is not affiliated with or supported by the upstream
+> WezTerm project. See [README-OSC52.md](README-OSC52.md) for the downstream
+> security model, usage, and validation contract.
 
 <img height="128" alt="WezTerm Icon" src="https://raw.githubusercontent.com/wezterm/wezterm/main/assets/icon/wezterm-icon.svg" align="left"> *A GPU-accelerated cross-platform terminal emulator and multiplexer written by <a href="https://github.com/wez">@wez</a> and implemented in <a href="https://www.rust-lang.org/">Rust</a>*
 
