@@ -4,6 +4,13 @@ set -e
 
 TARGET_DIR=${1:-target}
 
+# Container jobs can run as a different user than actions/checkout, so Git's
+# dubious-ownership protection does not inherit the host runner's exception.
+# Trust only this ephemeral Actions checkout rather than disabling the check.
+if [[ ${GITHUB_ACTIONS:-} == true ]]; then
+  git config --global --add safe.directory "$PWD"
+fi
+
 TAG_NAME=${TAG_NAME:-$(git -c "core.abbrev=8" show -s "--format=%cd-%h" "--date=format:%Y%m%d-%H%M%S")}
 
 HERE=$(pwd)
