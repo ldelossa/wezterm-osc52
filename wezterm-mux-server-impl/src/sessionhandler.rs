@@ -289,7 +289,7 @@ impl SessionHandler {
             .insert(query_id, PendingClipboardQuery { pane_id, callback });
 
         let pending = Arc::clone(&self.pending_clipboard_queries);
-        promise::spawn::spawn(async move {
+        promise::spawn::spawn_into_main_thread(async move {
             smol::Timer::after(Duration::from_secs(5)).await;
             if let Some(pending) = pending.lock().unwrap().remove(&query_id) {
                 pending.callback.complete(None);

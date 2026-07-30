@@ -1480,7 +1480,7 @@ impl Clipboard for MuxClipboard {
             callback: Arc::clone(&callback),
         });
 
-        promise::spawn::spawn(async move {
+        promise::spawn::spawn_into_main_thread(async move {
             smol::Timer::after(Duration::from_secs(5)).await;
             callback.complete(None);
         })
