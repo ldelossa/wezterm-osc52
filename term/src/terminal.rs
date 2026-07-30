@@ -10,11 +10,24 @@ pub enum ClipboardSelection {
     PrimarySelection,
 }
 
+/// Receives the result of an asynchronous clipboard read.
+///
+/// `None` indicates that the clipboard could not be read. Implementations must
+/// tolerate being completed after the originating pane or client disconnects.
+pub trait ClipboardReadCallback: Send + Sync + std::fmt::Debug {
+    fn complete(&self, contents: Option<String>);
+}
+
 pub trait Clipboard: Send + Sync {
     fn set_contents(
         &self,
         selection: ClipboardSelection,
         data: Option<String>,
+    ) -> anyhow::Result<()>;
+    fn get_contents(
+        &self,
+        selection: ClipboardSelection,
+        callback: Arc<dyn ClipboardReadCallback>,
     ) -> anyhow::Result<()>;
 }
 
@@ -25,6 +38,13 @@ impl Clipboard for Box<dyn Clipboard> {
         data: Option<String>,
     ) -> anyhow::Result<()> {
         self.as_ref().set_contents(selection, data)
+    }
+    fn get_contents(
+        &self,
+        selection: ClipboardSelection,
+        callback: Arc<dyn ClipboardReadCallback>,
+    ) -> anyhow::Result<()> {
+        self.as_ref().get_contents(selection, callback)
     }
 }
 

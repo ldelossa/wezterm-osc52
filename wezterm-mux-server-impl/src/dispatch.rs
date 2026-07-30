@@ -141,6 +141,23 @@ where
                 .await?;
                 stream.flush().await.context("flushing PDU to client")?;
             }
+            Ok(Item::Notif(MuxNotification::QueryClipboard {
+                pane_id,
+                selection,
+                callback,
+            })) => {
+                if handler.should_forward_clipboard_query(pane_id) {
+                    let query_id = handler.register_clipboard_query(pane_id, callback);
+                    Pdu::QueryClipboard(codec::QueryClipboard {
+                        pane_id,
+                        selection,
+                        query_id,
+                    })
+                    .encode_async(&mut stream, 0)
+                    .await?;
+                    stream.flush().await.context("flushing PDU to client")?;
+                }
+            }
             Ok(Item::Notif(MuxNotification::TabAddedToWindow { tab_id, window_id })) => {
                 Pdu::TabAddedToWindow(codec::TabAddedToWindow { tab_id, window_id })
                     .encode_async(&mut stream, 0)
