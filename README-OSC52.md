@@ -8,6 +8,19 @@ with OSC 52.
 It is not affiliated with or supported by the upstream WezTerm project. Report
 issues specific to this build in `ldelossa/wezterm-osc52`, not upstream.
 
+## Downstream identity
+
+The macOS package installs as the drop-in `WezTerm.app` and retains the normal
+`wezterm` command names so existing launchers and key bindings continue to
+work. It uses the distinct bundle identifier
+`com.github.ldelossa.wezterm-osc52` and Homebrew cask token
+`wezterm-osc52`. The Help menu includes **About the OSC52 Fork**, which links
+back to the downstream notice and security documentation.
+
+Release archives are immutable, universal `arm64`/`x86_64` packages. Each app
+contains `Contents/Resources/wezterm-osc52-release.json` recording the exact
+upstream and downstream commits represented by that build.
+
 ## Enable clipboard querying
 
 Clipboard reads are disabled by default. Enable them explicitly:
