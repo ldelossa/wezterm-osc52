@@ -49,21 +49,41 @@ jobs:
         run: cargo check --locked -p mux -p wezterm-client -p wezterm-mux-server-impl -p wezterm-gui
       - name: Build universal release inputs
         run: |
-          VERSION="ci-${GITHUB_SHA::12}-osc52.0" ci/build-macos-universal.sh
+          VERSION="20990101-000000-${GITHUB_SHA::8}-osc52.0" ci/build-macos-universal.sh
       - name: Assemble and verify ad-hoc package
         run: |
-          VERSION="ci-${GITHUB_SHA::12}-osc52.0" SIGN_IDENTITY=- ci/package-macos.sh
+          VERSION="20990101-000000-${GITHUB_SHA::8}-osc52.0" SIGN_IDENTITY=- ci/package-macos.sh
       - name: Render and validate Homebrew cask
         run: |
-          VERSION="ci-${GITHUB_SHA::12}-osc52.0"
+          VERSION="20990101-000000-${GITHUB_SHA::8}-osc52.0"
           ci/generate-homebrew-cask.py \
             --version "$VERSION" \
             --archive "dist/WezTerm-macos-$VERSION.zip" \
             --output dist/wezterm-osc52.rb
           ci/validate-homebrew-cask.sh dist/wezterm-osc52.rb
+      - name: Create and validate release candidate inventory
+        run: |
+          VERSION="20990101-000000-${GITHUB_SHA::8}-osc52.0"
+          TREE_SHA=$(git rev-parse 'HEAD^{tree}')
+          UPSTREAM_SHA=$(tr -d '\n' <.upstream-sha)
+          ATTESTATION_DIGEST=$(printf 'contract-attestation' | shasum -a 256 | awk '{print $1}')
+          ci/create-release-candidate-manifest.py \
+            --archive "dist/WezTerm-macos-$VERSION.zip" \
+            --output dist/release-candidate-manifest.json \
+            --version "$VERSION" \
+            --source-sha "$GITHUB_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --upstream-sha "$UPSTREAM_SHA" \
+            --attestation-digest "$ATTESTATION_DIGEST" \
+            --repository-id "$GITHUB_REPOSITORY_ID" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-ref "ldelossa/wezterm-osc52/.github/workflows/build-release-candidate.yml@$GITHUB_SHA"
+          python3 -m json.tool dist/release-candidate-manifest.json >/dev/null
       - name: Upload package smoke-test artifact
         uses: actions/upload-artifact@v7
         with:
           name: wezterm-osc52-macos-smoke
-          path: dist/WezTerm-macos-*.zip
+          path: |
+            dist/WezTerm-macos-*.zip
+            dist/release-candidate-manifest.json
           retention-days: 3
