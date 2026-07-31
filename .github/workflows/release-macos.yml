@@ -72,13 +72,13 @@ jobs:
       - name: Sign, notarize, staple, and verify package
         run: |
           VERSION="$VERSION" SIGN_IDENTITY="$MACOS_TEAM_ID" ci/package-macos.sh
-      - name: Render immutable Homebrew cask
+      - name: Render and validate immutable Homebrew cask
         run: |
           ci/generate-homebrew-cask.py \
             --version "$VERSION" \
             --archive "dist/WezTerm-macos-$VERSION.zip" \
             --output dist/wezterm-osc52.rb
-          ruby -c dist/wezterm-osc52.rb
+          ci/validate-homebrew-cask.sh dist/wezterm-osc52.rb
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v7
         with:

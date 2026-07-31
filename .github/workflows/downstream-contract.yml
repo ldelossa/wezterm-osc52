@@ -53,6 +53,14 @@ jobs:
       - name: Assemble and verify ad-hoc package
         run: |
           VERSION="ci-${GITHUB_SHA::12}-osc52.0" SIGN_IDENTITY=- ci/package-macos.sh
+      - name: Render and validate Homebrew cask
+        run: |
+          VERSION="ci-${GITHUB_SHA::12}-osc52.0"
+          ci/generate-homebrew-cask.py \
+            --version "$VERSION" \
+            --archive "dist/WezTerm-macos-$VERSION.zip" \
+            --output dist/wezterm-osc52.rb
+          ci/validate-homebrew-cask.sh dist/wezterm-osc52.rb
       - name: Upload package smoke-test artifact
         uses: actions/upload-artifact@v7
         with:
