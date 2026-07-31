@@ -14,6 +14,12 @@ SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 VERSION_RE = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}-osc52\.[0-9]+\Z")
 ID_RE = re.compile(r"[1-9][0-9]*\Z")
+MAX_ARCHIVE_SIZE = 500 * 1024 * 1024
+MAX_UNCOMPRESSED_SIZE = 2 * 1024 * 1024 * 1024
+MAX_FILE_SIZE = 512 * 1024 * 1024
+MAX_SYMLINK_SIZE = 4096
+MAX_ENTRIES = 10_000
+CHUNK_SIZE = 1024 * 1024
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--archive", required=True, type=Path)
@@ -42,12 +48,22 @@ if not re.fullmatch(r"ldelossa/wezterm-osc52/\.github/workflows/build-release-ca
 if not args.archive.is_file():
     parser.error("archive does not exist")
 
-archive_bytes = args.archive.read_bytes()
+archive_size = args.archive.stat().st_size
+if archive_size < 1 or archive_size > MAX_ARCHIVE_SIZE:
+    raise SystemExit("archive size is outside policy")
+archive_hasher = hashlib.sha256()
+with args.archive.open("rb") as source:
+    while chunk := source.read(CHUNK_SIZE):
+        archive_hasher.update(chunk)
 entries = []
 seen = set()
 seen_casefolded = set()
+total_size = 0
 with zipfile.ZipFile(args.archive) as archive:
-    for item in sorted(archive.infolist(), key=lambda value: value.filename.encode("utf-8")):
+    infos = archive.infolist()
+    if not infos or len(infos) > MAX_ENTRIES:
+        raise SystemExit("archive entry count is outside policy")
+    for item in sorted(infos, key=lambda value: value.filename.encode("utf-8")):
         name = item.filename
         try:
             name.encode("utf-8", errors="strict")
@@ -65,6 +81,9 @@ with zipfile.ZipFile(args.archive) as archive:
             raise SystemExit("encrypted archive entries are forbidden")
         seen.add(name)
         seen_casefolded.add(collision_key)
+        total_size += item.file_size
+        if total_size > MAX_UNCOMPRESSED_SIZE:
+            raise SystemExit("archive expands beyond policy")
         mode = (item.external_attr >> 16) & 0xFFFF
         if item.is_dir():
             if mode and not stat.S_ISDIR(mode):
@@ -73,6 +92,8 @@ with zipfile.ZipFile(args.archive) as archive:
             digest = None
         elif stat.S_ISLNK(mode):
             kind = "symlink"
+            if item.file_size > MAX_SYMLINK_SIZE:
+                raise SystemExit("archive symlink target is too large")
             target = archive.read(item)
             try:
                 target_text = target.decode("utf-8", errors="strict")
@@ -85,8 +106,14 @@ with zipfile.ZipFile(args.archive) as archive:
         else:
             if not stat.S_ISREG(mode):
                 raise SystemExit("non-regular archive entries are forbidden")
+            if item.file_size > MAX_FILE_SIZE:
+                raise SystemExit("archive entry exceeds the per-file policy")
             kind = "file"
-            digest = hashlib.sha256(archive.read(item)).hexdigest()
+            entry_hasher = hashlib.sha256()
+            with archive.open(item) as source:
+                while chunk := source.read(CHUNK_SIZE):
+                    entry_hasher.update(chunk)
+            digest = entry_hasher.hexdigest()
         entries.append({
             "path": name,
             "kind": kind,
@@ -111,8 +138,8 @@ manifest = {
     },
     "archive": {
         "name": args.archive.name,
-        "size": len(archive_bytes),
-        "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+        "size": archive_size,
+        "sha256": archive_hasher.hexdigest(),
         "entries": entries,
     },
 }
