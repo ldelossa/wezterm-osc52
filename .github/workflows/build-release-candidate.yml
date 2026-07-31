@@ -21,6 +21,32 @@ on:
       workflow_sha:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact accepted downstream commit
+        required: true
+        type: string
+      tree_sha:
+        description: Exact controller-reconstructed tree
+        required: true
+        type: string
+      upstream_sha:
+        description: Exact canonical upstream commit
+        required: true
+        type: string
+      version:
+        description: Immutable release version
+        required: true
+        type: string
+      attestation_digest:
+        description: Controller attestation SHA-256
+        required: true
+        type: string
+      workflow_sha:
+        description: Trusted commit containing this reusable workflow
+        required: true
+        type: string
 
 permissions:
   contents: read
