@@ -11,14 +11,13 @@ cask "wezterm-osc52" do
     "wezterm",
     "wezterm@nightly",
   ]
+  depends_on macos: :big_sur
 
   app "WezTerm.app"
-
   binary "#{appdir}/WezTerm.app/Contents/MacOS/wezterm"
   binary "#{appdir}/WezTerm.app/Contents/MacOS/wezterm-gui"
   binary "#{appdir}/WezTerm.app/Contents/MacOS/wezterm-mux-server"
   binary "#{appdir}/WezTerm.app/Contents/MacOS/strip-ansi-escapes"
-
   bash_completion "#{appdir}/WezTerm.app/Contents/Resources/shell-completion/bash", target: "wezterm"
   fish_completion "#{appdir}/WezTerm.app/Contents/Resources/shell-completion/fish", target: "wezterm.fish"
   zsh_completion "#{appdir}/WezTerm.app/Contents/Resources/shell-completion/zsh", target: "_wezterm"
