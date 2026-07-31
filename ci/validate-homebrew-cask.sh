@@ -20,14 +20,21 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 0
 fi
 
-TAP="wezterm-osc52-ci/style-${GITHUB_RUN_ID:-local}-$$"
-brew tap-new --no-git "$TAP" >/dev/null
+# Homebrew requires casks under a tap for style checks. Stage the candidate in
+# the canonical tap checkout, then restore its original file. Never force-untap
+# a temporary tap: Homebrew interprets that as permission to uninstall any
+# installed cask whose token appears in the tap.
+TAP=ldelossa/wezterm-osc52
+brew tap "$TAP" >/dev/null
+TAP_DIR=$(brew --repository "$TAP")
+TARGET="$TAP_DIR/Casks/wezterm-osc52.rb"
+BACKUP=$(mktemp "${TMPDIR:-/tmp}/wezterm-osc52-cask-backup.XXXXXX")
+cp "$TARGET" "$BACKUP"
 cleanup() {
-  brew untap --force "$TAP" >/dev/null 2>&1 || true
+  cp "$BACKUP" "$TARGET"
+  rm -f "$BACKUP"
 }
 trap cleanup EXIT
 
-TAP_DIR=$(brew --repository "$TAP")
-mkdir -p "$TAP_DIR/Casks"
-cp "$CASK" "$TAP_DIR/Casks/wezterm-osc52.rb"
+cp "$CASK" "$TARGET"
 brew style --cask "$TAP/wezterm-osc52"
