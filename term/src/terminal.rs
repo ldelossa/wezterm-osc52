@@ -10,31 +10,12 @@ pub enum ClipboardSelection {
     PrimarySelection,
 }
 
-/// A special trait that defines an interface for reading the clipboard content via [`Clipboard::get_contents`].
-/// Once the content is available, it will be written to the provided [`Box<dyn ClipboardReader>`].
-pub trait ClipboardReader: Send + Sync + std::fmt::Debug + ClipboardReaderBoxClone {
-    /// Similar to [`std::io::Write`] but receives a full String instead of bytes
-    fn write(&mut self, contents: String) -> Result<(), std::io::Error>;
-}
-
-/// Allow [`ClipboardReader`] to be [`Clone`] when used within [`Box<dyn ClipboardReader>`]
-pub trait ClipboardReaderBoxClone {
-    fn clone_box(&self) -> Box<dyn ClipboardReader>;
-}
-// Automatically implement for all `dyn ClipboardReader` types that also implement `Clone`
-impl<T> ClipboardReaderBoxClone for T
-where
-    T: 'static + ClipboardReader + Clone,
-{
-    fn clone_box(&self) -> Box<dyn ClipboardReader> {
-        Box::new(self.clone())
-    }
-}
-
-impl Clone for Box<dyn ClipboardReader> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
+/// Receives the result of an asynchronous clipboard read.
+///
+/// `None` indicates that the clipboard could not be read. Implementations must
+/// tolerate being completed after the originating pane or client disconnects.
+pub trait ClipboardReadCallback: Send + Sync + std::fmt::Debug {
+    fn complete(&self, contents: Option<String>);
 }
 
 pub trait Clipboard: Send + Sync {
@@ -46,7 +27,7 @@ pub trait Clipboard: Send + Sync {
     fn get_contents(
         &self,
         selection: ClipboardSelection,
-        writer: Box<dyn ClipboardReader>,
+        callback: Arc<dyn ClipboardReadCallback>,
     ) -> anyhow::Result<()>;
 }
 
@@ -61,9 +42,9 @@ impl Clipboard for Box<dyn Clipboard> {
     fn get_contents(
         &self,
         selection: ClipboardSelection,
-        writer: Box<dyn ClipboardReader>,
+        callback: Arc<dyn ClipboardReadCallback>,
     ) -> anyhow::Result<()> {
-        self.as_ref().get_contents(selection, writer)
+        self.as_ref().get_contents(selection, callback)
     }
 }
 

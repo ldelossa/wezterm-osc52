@@ -11,11 +11,11 @@ use mux::{Mux, MuxNotification};
 use promise::spawn::spawn_into_main_thread;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use termwiz::surface::SequenceNo;
 use url::Url;
 use wezterm_term::terminal::Alert;
-use wezterm_term::StableRowIndex;
+use wezterm_term::{ClipboardReadCallback, StableRowIndex};
 
 #[derive(Clone)]
 pub struct PduSender {
@@ -196,15 +196,49 @@ fn maybe_push_pane_changes(
     Ok(())
 }
 
+#[derive(Debug)]
+struct PendingClipboardQuery {
+    pane_id: PaneId,
+    callback: Arc<dyn ClipboardReadCallback>,
+}
+
+fn take_pending_clipboard_query(
+    pending: &mut HashMap<u64, PendingClipboardQuery>,
+    pane_id: PaneId,
+    query_id: u64,
+) -> anyhow::Result<Arc<dyn ClipboardReadCallback>> {
+    match pending.get(&query_id) {
+        Some(query) if query.pane_id == pane_id => Ok(pending.remove(&query_id).unwrap().callback),
+        Some(query) => Err(anyhow!(
+            "clipboard query {query_id} belongs to pane {}, not {pane_id}",
+            query.pane_id
+        )),
+        None => Err(anyhow!("unknown or expired clipboard query {query_id}")),
+    }
+}
+
 pub struct SessionHandler {
     to_write_tx: PduSender,
     per_pane: HashMap<TabId, Arc<Mutex<PerPane>>>,
     client_id: Option<Arc<ClientId>>,
     proxy_client_id: Option<ClientId>,
+    pending_clipboard_queries: Arc<Mutex<HashMap<u64, PendingClipboardQuery>>>,
+    next_clipboard_query_id: u64,
 }
 
 impl Drop for SessionHandler {
     fn drop(&mut self) {
+        let pending = self
+            .pending_clipboard_queries
+            .lock()
+            .unwrap()
+            .drain()
+            .map(|(_, pending)| pending.callback)
+            .collect::<Vec<_>>();
+        for callback in pending {
+            callback.complete(None);
+        }
+
         if let Some(client_id) = self.client_id.take() {
             let mux = Mux::get();
             mux.unregister_client(&client_id);
@@ -219,7 +253,50 @@ impl SessionHandler {
             per_pane: HashMap::new(),
             client_id: None,
             proxy_client_id: None,
+            pending_clipboard_queries: Arc::new(Mutex::new(HashMap::new())),
+            next_clipboard_query_id: 1,
         }
+    }
+
+    pub fn should_forward_clipboard_query(&self, pane_id: PaneId) -> bool {
+        let Some(client_id) = &self.client_id else {
+            return false;
+        };
+
+        Mux::get()
+            .iter_clients()
+            .into_iter()
+            .filter(|info| info.focused_pane_id == Some(pane_id))
+            .max_by(|a, b| {
+                a.last_input
+                    .cmp(&b.last_input)
+                    .then_with(|| a.client_id.id.cmp(&b.client_id.id))
+            })
+            .is_some_and(|info| info.client_id.as_ref() == client_id.as_ref())
+    }
+
+    pub fn register_clipboard_query(
+        &mut self,
+        pane_id: PaneId,
+        callback: Arc<dyn ClipboardReadCallback>,
+    ) -> u64 {
+        let query_id = self.next_clipboard_query_id;
+        self.next_clipboard_query_id = self.next_clipboard_query_id.wrapping_add(1).max(1);
+        self.pending_clipboard_queries
+            .lock()
+            .unwrap()
+            .insert(query_id, PendingClipboardQuery { pane_id, callback });
+
+        let pending = Arc::clone(&self.pending_clipboard_queries);
+        promise::spawn::spawn_into_main_thread(async move {
+            smol::Timer::after(Duration::from_secs(5)).await;
+            if let Some(pending) = pending.lock().unwrap().remove(&query_id) {
+                pending.callback.complete(None);
+            }
+        })
+        .detach();
+
+        query_id
     }
 
     pub(crate) fn per_pane(&mut self, pane_id: PaneId) -> Arc<Mutex<PerPane>> {
@@ -987,12 +1064,31 @@ impl SessionHandler {
                 .detach();
             }
 
+            Pdu::QueryClipboardResponse(QueryClipboardResponse {
+                pane_id,
+                query_id,
+                content,
+            }) => {
+                let callback = take_pending_clipboard_query(
+                    &mut self.pending_clipboard_queries.lock().unwrap(),
+                    pane_id,
+                    query_id,
+                );
+
+                match callback {
+                    Ok(callback) => {
+                        callback.complete(content);
+                        send_response(Ok(Pdu::UnitResponse(UnitResponse {})));
+                    }
+                    Err(err) => send_response(Err(err)),
+                }
+            }
+
             Pdu::Invalid { .. } => send_response(Err(anyhow!("invalid PDU {:?}", decoded.pdu))),
             Pdu::Pong { .. }
             | Pdu::ListPanesResponse { .. }
             | Pdu::SetClipboard { .. }
             | Pdu::QueryClipboard { .. }
-            | Pdu::QueryClipboardResponse { .. }
             | Pdu::NotifyAlert { .. }
             | Pdu::SpawnResponse { .. }
             | Pdu::GetPaneRenderChangesResponse { .. }
@@ -1105,6 +1201,88 @@ fn schedule_move_pane<SND>(
 {
     promise::spawn::spawn(async move { send_response(move_pane(request, client_id).await) })
         .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestClipboardCallback(Arc<Mutex<Vec<Option<String>>>>);
+
+    impl ClipboardReadCallback for TestClipboardCallback {
+        fn complete(&self, contents: Option<String>) {
+            self.0.lock().unwrap().push(contents);
+        }
+    }
+
+    fn callback() -> (
+        Arc<dyn ClipboardReadCallback>,
+        Arc<Mutex<Vec<Option<String>>>>,
+    ) {
+        let completions = Arc::new(Mutex::new(vec![]));
+        (
+            Arc::new(TestClipboardCallback(Arc::clone(&completions))),
+            completions,
+        )
+    }
+
+    #[test]
+    fn clipboard_query_ids_correlate_concurrent_responses() {
+        let (first, first_completions) = callback();
+        let (second, second_completions) = callback();
+        let mut pending = HashMap::from([
+            (
+                1,
+                PendingClipboardQuery {
+                    pane_id: 10,
+                    callback: first,
+                },
+            ),
+            (
+                2,
+                PendingClipboardQuery {
+                    pane_id: 20,
+                    callback: second,
+                },
+            ),
+        ]);
+
+        let callback = take_pending_clipboard_query(&mut pending, 20, 2).unwrap();
+        callback.complete(Some("second".to_string()));
+        assert!(pending.contains_key(&1));
+        assert!(!pending.contains_key(&2));
+        assert!(first_completions.lock().unwrap().is_empty());
+        assert_eq!(
+            &*second_completions.lock().unwrap(),
+            &[Some("second".to_string())]
+        );
+
+        let callback = take_pending_clipboard_query(&mut pending, 10, 1).unwrap();
+        callback.complete(Some("first".to_string()));
+        assert!(pending.is_empty());
+        assert_eq!(
+            &*first_completions.lock().unwrap(),
+            &[Some("first".to_string())]
+        );
+    }
+
+    #[test]
+    fn clipboard_query_rejects_wrong_pane_without_consuming_request() {
+        let (callback, completions) = callback();
+        let mut pending = HashMap::from([(
+            7,
+            PendingClipboardQuery {
+                pane_id: 10,
+                callback,
+            },
+        )]);
+
+        let err = take_pending_clipboard_query(&mut pending, 11, 7).unwrap_err();
+        assert!(err.to_string().contains("belongs to pane 10"));
+        assert!(pending.contains_key(&7));
+        assert!(completions.lock().unwrap().is_empty());
+    }
 }
 
 async fn move_pane(

@@ -20,6 +20,7 @@ use ratelim::RateLimiter;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use termwiz::input::KeyEvent;
 use termwiz::surface::SequenceNo;
@@ -27,8 +28,8 @@ use url::Url;
 use wezterm_dynamic::Value;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::{
-    Alert, Clipboard, ClipboardReader, KeyCode, KeyModifiers, Line, MouseEvent, StableRowIndex,
-    TerminalConfiguration, TerminalSize,
+    Alert, Clipboard, ClipboardReadCallback, KeyCode, KeyModifiers, Line, MouseEvent, Progress,
+    StableRowIndex, TerminalConfiguration, TerminalSize,
 };
 
 pub struct ClientPane {
@@ -51,20 +52,44 @@ pub struct ClientPane {
     progress: Mutex<Progress>,
 }
 
-/// Implement [`ClipboardReader`] for the [`smol::channel::Sender`] for
-/// receiving the clipboard content from [`Clipboard::get_contents`]
-/// and redirecting it to the corresponding [`smol::channel::Receiver`]
-#[derive(Debug, Clone)]
-struct ClientClipboardReader(smol::channel::Sender<String>);
+struct ClientClipboardReadCallback {
+    client: Arc<ClientInner>,
+    pane_id: PaneId,
+    query_id: u64,
+    completed: AtomicBool,
+}
 
-impl ClipboardReader for ClientClipboardReader {
-    fn write(&mut self, contents: String) -> Result<(), std::io::Error> {
-        let tx = self.0.clone();
+impl std::fmt::Debug for ClientClipboardReadCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientClipboardReadCallback")
+            .field("pane_id", &self.pane_id)
+            .field("query_id", &self.query_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClipboardReadCallback for ClientClipboardReadCallback {
+    fn complete(&self, content: Option<String>) {
+        if self.completed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let client = Arc::clone(&self.client);
+        let pane_id = self.pane_id;
+        let query_id = self.query_id;
         promise::spawn::spawn(async move {
-            let _ = tx.send(contents).await;
+            if let Err(err) = client
+                .client
+                .send_pdu(Pdu::QueryClipboardResponse(QueryClipboardResponse {
+                    pane_id,
+                    query_id,
+                    content,
+                }))
+                .await
+            {
+                log::error!("failed to return clipboard query {query_id}: {err:#}");
+            }
         })
         .detach();
-        Ok(())
     }
 }
 
@@ -185,35 +210,37 @@ impl ClientPane {
                     log::error!("ClientPane: Ignoring SetClipboard request {:?}", clipboard);
                 }
             },
-            Pdu::QueryClipboard(QueryClipboard { pane_id, selection }) => {
+            Pdu::QueryClipboard(QueryClipboard {
+                pane_id,
+                selection,
+                query_id,
+            }) => {
                 log::debug!(
-                    "Pdu::QueryClipboard pane={:?} pane={} remote={} {:?}",
+                    "Pdu::QueryClipboard query={} pane={:?} local={} remote={} {:?}",
+                    query_id,
                     pane_id,
                     self.local_pane_id,
                     self.remote_pane_id,
                     selection,
                 );
-                match self.clipboard.lock().as_ref() {
+                let callback: Arc<dyn ClipboardReadCallback> =
+                    Arc::new(ClientClipboardReadCallback {
+                        client: Arc::clone(&self.client),
+                        pane_id: self.remote_pane_id,
+                        query_id,
+                        completed: AtomicBool::new(false),
+                    });
+                let clipboard = self.clipboard.lock().clone();
+                match clipboard {
                     Some(clip) => {
-                        let client = Arc::clone(&self.client);
-                        let remote_pane_id = self.remote_pane_id;
-                        let (tx, rx) = smol::channel::bounded(1);
-                        clip.get_contents(selection, Box::new(ClientClipboardReader(tx)))?;
-
-                        promise::spawn::spawn(async move {
-                            let content = rx.recv().await.ok();
-                            let _ = client
-                                .client
-                                .send_pdu(Pdu::QueryClipboardResponse(QueryClipboardResponse {
-                                    pane_id: remote_pane_id,
-                                    content,
-                                }))
-                                .await;
-                        })
-                        .detach();
+                        if let Err(err) = clip.get_contents(selection, Arc::clone(&callback)) {
+                            log::error!("failed to read clipboard for query {query_id}: {err:#}");
+                            callback.complete(None);
+                        }
                     }
                     None => {
-                        log::error!("ClientPane: Ignoring QueryClipboard request");
+                        log::error!("ClientPane: no clipboard for query {query_id}");
+                        callback.complete(None);
                     }
                 }
             }

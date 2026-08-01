@@ -2,6 +2,7 @@
 .DS_Store
 dhat-heap.json
 /docs/_site
+/dist/
 /docs/favicon.png
 /docs/favicon.svg
 /docs/fonts/*

@@ -441,7 +441,7 @@ macro_rules! pdu {
 /// The overall version of the codec.
 /// This must be bumped when backwards incompatible changes
 /// are made to the types and protocol.
-pub const CODEC_VERSION: usize = 45;
+pub const CODEC_VERSION: usize = 46;
 
 // Defines the Pdu enum.
 // Each struct has an explicit identifying number.
@@ -518,7 +518,6 @@ impl Pdu {
             | Self::SendPaste(_)
             | Self::Resize(_)
             | Self::SetClipboard(_)
-            | Self::QueryClipboard(_)
             | Self::SetPaneZoomed(_)
             | Self::SpawnV2(_) => true,
             _ => false,
@@ -777,11 +776,13 @@ pub struct SetClipboard {
 pub struct QueryClipboard {
     pub pane_id: PaneId,
     pub selection: ClipboardSelection,
+    pub query_id: u64,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct QueryClipboardResponse {
     pub pane_id: PaneId,
+    pub query_id: u64,
     pub content: Option<String>,
 }
 
@@ -1249,6 +1250,49 @@ mod test {
                 pdu: Pdu::Ping(Ping {})
             },
             Pdu::decode(decoded.as_slice()).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_clipboard_query_round_trip_preserves_query_id() {
+        let mut encoded = Vec::new();
+        Pdu::QueryClipboard(QueryClipboard {
+            pane_id: 42,
+            selection: ClipboardSelection::Clipboard,
+            query_id: 99,
+        })
+        .encode(&mut encoded, 0)
+        .unwrap();
+        assert_eq!(
+            Pdu::decode(encoded.as_slice()).unwrap(),
+            DecodedPdu {
+                serial: 0,
+                pdu: Pdu::QueryClipboard(QueryClipboard {
+                    pane_id: 42,
+                    selection: ClipboardSelection::Clipboard,
+                    query_id: 99,
+                }),
+            }
+        );
+
+        encoded.clear();
+        Pdu::QueryClipboardResponse(QueryClipboardResponse {
+            pane_id: 42,
+            query_id: 99,
+            content: Some("clipboard".to_string()),
+        })
+        .encode(&mut encoded, 7)
+        .unwrap();
+        assert_eq!(
+            Pdu::decode(encoded.as_slice()).unwrap(),
+            DecodedPdu {
+                serial: 7,
+                pdu: Pdu::QueryClipboardResponse(QueryClipboardResponse {
+                    pane_id: 42,
+                    query_id: 99,
+                    content: Some("clipboard".to_string()),
+                }),
+            }
         );
     }
 

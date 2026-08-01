@@ -1,0 +1,122 @@
+name: release-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Immutable release version (for example 20260730-143944-abcdef12-osc52.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wezterm-osc52-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: macos-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      VERSION: ${{ inputs.version }}
+      MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+      MACOS_APP_PASSWORD: ${{ secrets.MACOS_APP_PASSWORD }}
+      MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Validate version
+        run: |
+          [[ "$VERSION" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}-osc52\.[0-9]+$ ]]
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag already exists: $VERSION" >&2
+            exit 1
+          fi
+      - name: Install system dependencies
+        run: env CI=yes ./get-deps
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          echo "$KEYCHAIN_PASSWORD" >"$RUNNER_TEMP/build-keychain-password"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -d user -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          printf '%s' "$MACOS_CERTIFICATE_P12" | base64 --decode >"$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" \
+            -k build.keychain \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm -f "$RUNNER_TEMP/developer-id.p12"
+          security find-identity -v -p codesigning build.keychain
+      - name: Build universal release inputs
+        run: VERSION="$VERSION" ci/build-macos-universal.sh
+      - name: Sign, notarize, staple, and verify package
+        run: |
+          VERSION="$VERSION" SIGN_IDENTITY="$MACOS_TEAM_ID" ci/package-macos.sh
+      - name: Render immutable Homebrew cask
+        run: |
+          UPSTREAM_SHA=$(tr -d '\n' < .upstream-sha)
+          ci/generate-homebrew-cask.py \
+            --version "$VERSION" \
+            --upstream-sha "$UPSTREAM_SHA" \
+            --archive "dist/WezTerm-macos-$VERSION.zip" \
+            --output dist/wezterm-osc52.rb
+          ruby -c dist/wezterm-osc52.rb
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: "wezterm-osc52-${{ inputs.version }}"
+          path: |
+            dist/WezTerm-macos-*.zip
+            dist/WezTerm-macos-*.zip.sha256
+            dist/wezterm-osc52.rb
+          if-no-files-found: error
+          retention-days: 14
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          UPSTREAM_SHA=$(tr -d '\n' <.upstream-sha)
+          cat >"$RUNNER_TEMP/release-notes.md" <<EOF
+          Unofficial downstream WezTerm build with opt-in OSC 52 clipboard querying.
+
+          - Upstream SHA: \`$UPSTREAM_SHA\`
+          - Downstream SHA: \`$GITHUB_SHA\`
+          - Universal architectures: \`arm64 x86_64\`
+          - Developer ID signed, notarized, and stapled
+
+          OSC 52 clipboard reading is disabled by default. See README-OSC52.md before enabling it.
+          EOF
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" \
+              --target "$GITHUB_SHA" \
+              --title "$VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --draft
+          fi
+          gh release upload "$VERSION" --clobber \
+            "dist/WezTerm-macos-$VERSION.zip" \
+            "dist/WezTerm-macos-$VERSION.zip.sha256" \
+            dist/wezterm-osc52.rb
+      - name: Remove temporary keychain
+        if: always()
+        run: security delete-keychain build.keychain || true

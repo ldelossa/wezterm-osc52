@@ -1,40 +1,84 @@
-# Wez's Terminal
+# WezTerm OSC52
 
-<img height="128" alt="WezTerm Icon" src="https://raw.githubusercontent.com/wezterm/wezterm/main/assets/icon/wezterm-icon.svg" align="left"> *A GPU-accelerated cross-platform terminal emulator and multiplexer written by <a href="https://github.com/wez">@wez</a> and implemented in <a href="https://www.rust-lang.org/">Rust</a>*
+> [!IMPORTANT]
+> Unofficial downstream of [WezTerm](https://github.com/wezterm/wezterm). Not
+> affiliated with upstream. Report issues
+> [here](https://github.com/ldelossa/wezterm-osc52).
 
-User facing docs and guide at: https://wezterm.org/
+This fork adds opt-in OSC 52 clipboard reading to WezTerm, enabling native
+clipboard paste from Neovim over SSH. **Releases are fully automated and
+AI-driven** — every upstream change is detected, merged, built, signed,
+notarized, and published without human intervention. Merge conflicts are
+resolved automatically by AI.
 
-![Screenshot](docs/screenshots/two.png)
+## Install
 
-*Screenshot of wezterm on macOS, running vim*
+```bash
+brew tap ldelossa/wezterm-osc52
+brew install --cask wezterm-osc52
+```
 
-## Installation
+Updates arrive automatically with `brew upgrade`. The cask conflicts with
+`wezterm` and `wezterm@nightly` — uninstall those first.
 
-https://wezterm.org/installation
+## Enable OSC 52 clipboard reading
 
-## Getting help
+Clipboard reading is **disabled by default**. Add to `~/.config/wezterm/wezterm.lua`:
 
-This is a spare time project, so please bear with me.  There are a couple of channels for support:
+```lua
+local wezterm = require 'wezterm'
+local config = wezterm.config_builder()
+config.enable_osc52_clipboard_reading = true
+return config
+```
 
-* You can use the [GitHub issue tracker](https://github.com/wezterm/wezterm/issues) to see if someone else has a similar issue, or to file a new one.
-* Start or join a thread in our [GitHub Discussions](https://github.com/wezterm/wezterm/discussions); if you have general
-  questions or want to chat with other wezterm users, you're welcome here!
-* There is a [Matrix room via Element.io](https://matrix.to/#/#wezterm:matrix.org)
-  for (potentially!) real time discussions.
+Neovim uses its built-in OSC 52 provider — no plugin needed:
 
-The GitHub Discussions and Element/Gitter rooms are better suited for questions
-than bug reports, but don't be afraid to use whichever you are most comfortable
-using and we'll work it out.
+```lua
+local osc52 = require 'vim.ui.clipboard.osc52'
+vim.g.clipboard = {
+  name = 'OSC 52',
+  copy = { ['+'] = osc52.copy('+'), ['*'] = osc52.copy('*') },
+  paste = { ['+'] = osc52.paste('+'), ['*'] = osc52.paste('*') },
+}
+```
 
-## Supporting the Project
+## Identity
 
-If you use and like WezTerm, please consider sponsoring it: your support helps
-to cover the fees required to maintain the project and to validate the time
-spent working on it!
+| Property | Value |
+|---|---|
+| App name | `WezTerm.app` |
+| CLI commands | `wezterm`, `wezterm-gui`, `wezterm-mux-server`, `strip-ansi-escapes` |
+| Bundle ID | `com.github.ldelossa.wezterm-osc52` |
+| Cask | `wezterm-osc52` |
+| Version suffix | `-osc52.N` |
 
-[Read more about sponsoring](https://wezterm.org/sponsor.html).
+The app is signed, notarized, and stapled with a Developer ID certificate.
+Identity and provenance are embedded in the app bundle.
 
-* [![Sponsor WezTerm](https://img.shields.io/github/sponsors/wez?label=Sponsor%20WezTerm&logo=github&style=for-the-badge)](https://github.com/sponsors/wez)
-* [Patreon](https://patreon.com/WezFurlong)
-* [Ko-Fi](https://ko-fi.com/wezfurlong)
-* [Liberapay](https://liberapay.com/wez)
+## How it works
+
+An [automation controller](https://github.com/ldelossa/wezterm-osc52-automation)
+polls upstream hourly. When `wezterm/wezterm:main` advances:
+
+1. The downstream patch is merged into the new upstream.
+2. If merge conflicts exist, **AI resolves them** using DeepSeek V4 Pro with
+   full repository context.
+3. A secretless universal macOS build produces an unsigned candidate.
+4. An isolated signer applies Apple code signing and notarization.
+5. A credential-free verifier validates the signed artifact.
+6. A GitHub Release is published and the Homebrew cask is updated.
+
+All steps are automated. No human touches the pipeline. The last known-good
+release is preserved on every failure.
+
+## Security
+
+Enabling clipboard reading allows any process that writes terminal output to
+read the clipboard — including remote hosts over SSH. Only enable this when
+that trust model is acceptable.
+
+## License
+
+WezTerm is Copyright © 2018–Present Wez Furlong, distributed under the
+[MIT License](LICENSE.md). This fork preserves all upstream licenses.

@@ -1,0 +1,131 @@
+name: build-release-candidate
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      tree_sha:
+        required: true
+        type: string
+      upstream_sha:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      attestation_digest:
+        required: true
+        type: string
+      workflow_sha:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact accepted downstream commit
+        required: true
+        type: string
+      tree_sha:
+        description: Exact controller-reconstructed tree
+        required: true
+        type: string
+      upstream_sha:
+        description: Exact canonical upstream commit
+        required: true
+        type: string
+      version:
+        description: Immutable release version
+        required: true
+        type: string
+      attestation_digest:
+        description: Controller attestation SHA-256
+        required: true
+        type: string
+      workflow_sha:
+        description: Trusted commit containing this reusable workflow
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Check out exact accepted source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: ldelossa/wezterm-osc52
+          ref: ${{ inputs.source_sha }}
+          submodules: recursive
+          persist-credentials: false
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+      - name: Bind exact source facts
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TREE_SHA: ${{ inputs.tree_sha }}
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+          ATTESTATION_DIGEST: ${{ inputs.attestation_digest }}
+          WORKFLOW_SHA: ${{ inputs.workflow_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TREE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ATTESTATION_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VERSION" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}-osc52\.[0-9]+$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TREE_SHA"
+          test "$(tr -d '\n' <.upstream-sha)" = "$UPSTREAM_SHA"
+      - name: Install system dependencies
+        run: env CI=yes ./get-deps
+      - name: Build universal inputs without credentials
+        run: VERSION="$VERSION" ci/build-macos-universal.sh
+      - name: Assemble and exercise ad-hoc candidate without credentials
+        run: VERSION="$VERSION" SIGN_IDENTITY=- ci/package-macos.sh
+      - name: Create canonical candidate inventory
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TREE_SHA: ${{ inputs.tree_sha }}
+          UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+          ATTESTATION_DIGEST: ${{ inputs.attestation_digest }}
+          WORKFLOW_SHA: ${{ inputs.workflow_sha }}
+        run: |
+          ci/create-release-candidate-manifest.py \
+            --archive "dist/WezTerm-macos-$VERSION.zip" \
+            --output dist/release-candidate-manifest.json \
+            --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --tree-sha "$TREE_SHA" \
+            --upstream-sha "$UPSTREAM_SHA" \
+            --attestation-digest "$ATTESTATION_DIGEST" \
+            --repository-id "1317524716" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-ref "ldelossa/wezterm-osc52/.github/workflows/build-release-candidate.yml@$WORKFLOW_SHA"
+      - name: Upload immutable candidate artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-candidate-${{ inputs.version }}
+          path: |
+            dist/WezTerm-macos-${{ inputs.version }}.zip
+            dist/release-candidate-manifest.json
+          if-no-files-found: error
+          retention-days: 14

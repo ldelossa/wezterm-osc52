@@ -1695,6 +1695,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
                 menubar: &["Help"],
                 icon: Some("fa_ticket"),
             },
+            "https://github.com/ldelossa/wezterm-osc52" => CommandDef {
+                brief: "About the OSC52 Fork".into(),
+                doc: "View the unofficial downstream notice and OSC52 security documentation".into(),
+                keys: vec![],
+                args: &[],
+                menubar: &["Help"],
+                icon: Some("md_info"),
+            },
             _ => CommandDef {
                 brief: format!("Open {uri} in your browser").into(),
                 doc: format!("Open {uri} in your browser").into(),
@@ -2140,6 +2148,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         OpenUri("https://wezterm.org/".to_string()),
         OpenUri("https://github.com/wezterm/wezterm/discussions/".to_string()),
         OpenUri("https://github.com/wezterm/wezterm/issues/".to_string()),
+        OpenUri("https://github.com/ldelossa/wezterm-osc52".to_string()),
         ShowDebugOverlay,
         // ----------------- Misc
         OpenLinkAtMouseCursor,

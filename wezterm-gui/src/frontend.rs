@@ -203,7 +203,7 @@ impl GuiFrontEnd {
                 MuxNotification::QueryClipboard {
                     pane_id,
                     selection,
-                    mut writer,
+                    callback,
                 } => {
                     promise::spawn::spawn_into_main_thread(async move {
                         let fe = crate::frontend::front_end();
@@ -215,24 +215,18 @@ impl GuiFrontEnd {
                             };
                             let future = window.get_clipboard(clipboard);
                             promise::spawn::spawn(async move {
-                                let content = future.await;
-                                match content {
-                                    Ok(content) => {
-                                        if let Err(err) = writer.write(content) {
-                                            log::error!(
-                                                "Error sending clipboard content {:?}",
-                                                err
-                                            );
-                                        };
-                                    }
+                                match future.await {
+                                    Ok(content) => callback.complete(Some(content)),
                                     Err(err) => {
                                         log::error!("Error reading clipboard {:?}", err);
+                                        callback.complete(None);
                                     }
                                 }
                             })
                             .detach();
                         } else {
                             log::error!("Cannot get clipboard as there are no windows");
+                            callback.complete(None);
                         };
                     })
                     .detach();

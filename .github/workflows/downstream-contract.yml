@@ -1,0 +1,61 @@
+name: downstream-contract
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: downstream-contract-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # pinned action revision (nightly)
+        with:
+          components: rustfmt
+      - run: cargo +nightly fmt --all -- --check
+
+  macos-contract:
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # pinned action revision (stable)
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+      - name: Install system dependencies
+        run: env CI=yes ./get-deps
+      - name: Test OSC52 terminal contract
+        run: cargo test --locked -p wezterm-term osc52
+      - name: Test codec contract
+        run: cargo test --locked -p codec
+      - name: Test mux correlation contract
+        run: cargo test --locked -p wezterm-mux-server-impl clipboard_query
+      - name: Check integration crates
+        run: cargo check --locked -p mux -p wezterm-client -p wezterm-mux-server-impl -p wezterm-gui
+      - name: Build universal release inputs
+        run: |
+          VERSION="ci-${GITHUB_SHA::12}-osc52.0" ci/build-macos-universal.sh
+      - name: Assemble and verify ad-hoc package
+        run: |
+          VERSION="ci-${GITHUB_SHA::12}-osc52.0" SIGN_IDENTITY=- ci/package-macos.sh
+      - name: Upload package smoke-test artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wezterm-osc52-macos-smoke
+          path: dist/WezTerm-macos-*.zip
+          retention-days: 3

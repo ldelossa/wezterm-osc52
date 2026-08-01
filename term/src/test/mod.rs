@@ -41,11 +41,9 @@ impl Clipboard for LocalClip {
     fn get_contents(
         &self,
         _selection: ClipboardSelection,
-        mut writer: Box<dyn ClipboardReader>,
+        callback: Arc<dyn ClipboardReadCallback>,
     ) -> anyhow::Result<()> {
-        writer
-            .write(format!("{:?}", &self.clip.lock().unwrap()))
-            .ok();
+        callback.complete(self.clip.lock().unwrap().clone());
         Ok(())
     }
 }
@@ -66,8 +64,28 @@ impl TerminalConfiguration for TestTermConfig {
     fn color_palette(&self) -> ColorPalette {
         ColorPalette::default()
     }
+
+    fn enable_kitty_graphics(&self) -> bool {
+        true
+    }
+
     fn enable_osc52_clipboard_reading(&self) -> bool {
         true
+    }
+}
+
+#[derive(Debug)]
+struct Osc52DisabledTestTermConfig {
+    scrollback: usize,
+}
+
+impl TerminalConfiguration for Osc52DisabledTestTermConfig {
+    fn scrollback_size(&self) -> usize {
+        self.scrollback
+    }
+
+    fn color_palette(&self) -> ColorPalette {
+        ColorPalette::default()
     }
 }
 
@@ -82,11 +100,26 @@ impl TestTerm {
         scrollback: usize,
         writer: Box<dyn std::io::Write + Send>,
     ) -> Self {
+        Self::new_with_writer_and_osc52(height, width, scrollback, writer, true)
+    }
+
+    fn new_with_writer_and_osc52(
+        height: usize,
+        width: usize,
+        scrollback: usize,
+        writer: Box<dyn std::io::Write + Send>,
+        enable_osc52_clipboard_reading: bool,
+    ) -> Self {
         let _ = env_logger::Builder::new()
             .is_test(true)
             .filter_level(log::LevelFilter::Trace)
             .try_init();
 
+        let config: Arc<dyn TerminalConfiguration> = if enable_osc52_clipboard_reading {
+            Arc::new(TestTermConfig { scrollback })
+        } else {
+            Arc::new(Osc52DisabledTestTermConfig { scrollback })
+        };
         let mut term = Terminal::new(
             TerminalSize {
                 rows: height,
@@ -95,7 +128,7 @@ impl TestTerm {
                 pixel_height: height * 16,
                 dpi: 0,
             },
-            Arc::new(TestTermConfig { scrollback }),
+            config,
             "WezTerm",
             "O_o",
             writer,
@@ -533,52 +566,160 @@ impl std::io::Write for TestOsc52Writer {
     }
 }
 
-struct TestOsc52Clip(LocalClip);
+#[derive(Debug)]
+struct TestOsc52Clip {
+    content: String,
+    selections: Arc<Mutex<Vec<ClipboardSelection>>>,
+    delay: std::time::Duration,
+    fail: bool,
+}
+
+impl TestOsc52Clip {
+    fn new(content: &str) -> Self {
+        Self {
+            content: content.to_string(),
+            selections: Arc::new(Mutex::new(vec![])),
+            delay: std::time::Duration::ZERO,
+            fail: false,
+        }
+    }
+}
 
 impl Clipboard for TestOsc52Clip {
     fn set_contents(
         &self,
         _selection: ClipboardSelection,
-        clip: Option<String>,
+        _clip: Option<String>,
     ) -> anyhow::Result<()> {
-        assert_eq!(clip, Some(String::from("hello")));
-        *self.0.clip.lock().unwrap() = clip;
         Ok(())
     }
+
     fn get_contents(
         &self,
-        _selection: ClipboardSelection,
-        mut writer: Box<dyn ClipboardReader>,
+        selection: ClipboardSelection,
+        callback: Arc<dyn ClipboardReadCallback>,
     ) -> anyhow::Result<()> {
-        log::error!("query selection {:?}", writer);
-        let osc = format!("{}", self.0.clip.lock().unwrap().clone().unwrap());
-        let rtn = writer.write(osc);
-        assert!(rtn.is_ok(), "{:?}", rtn);
+        self.selections.lock().unwrap().push(selection);
+        if self.fail {
+            anyhow::bail!("simulated clipboard failure");
+        }
+
+        let content = self.content.clone();
+        let delay = self.delay;
+        if delay.is_zero() {
+            callback.complete(Some(content));
+        } else {
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                callback.complete(Some(content));
+            });
+        }
         Ok(())
     }
 }
 
-#[test]
-fn test_osc52() {
+fn assert_osc52_query(
+    osc_selection: Selection,
+    clipboard_selection: ClipboardSelection,
+    expected_response: &str,
+) {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let mut term = TestTerm::new_with_writer(5, 10, 0, Box::new(TestOsc52Writer(tx)));
-
-    let clip: Arc<dyn Clipboard> = Arc::new(TestOsc52Clip(LocalClip::new()));
+    let clip = Arc::new(TestOsc52Clip::new("hello"));
+    let selections = Arc::clone(&clip.selections);
+    let clip: Arc<dyn Clipboard> = clip;
     term.set_clipboard(&clip);
+
     term.print(format!(
         "{}",
-        OperatingSystemCommand::SetSelection(Selection::CLIPBOARD, "hello".into())
+        OperatingSystemCommand::QuerySelection(osc_selection)
     ));
+
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("OSC 52 response");
+    assert_eq!(String::from_utf8_lossy(&result), expected_response);
+    assert_eq!(&*selections.lock().unwrap(), &[clipboard_selection]);
+}
+
+#[test]
+fn osc52_queries_clipboard() {
+    assert_osc52_query(
+        Selection::CLIPBOARD,
+        ClipboardSelection::Clipboard,
+        "\u{1b}]52;c;aGVsbG8=\u{1b}\\",
+    );
+}
+
+#[test]
+fn osc52_queries_primary_selection() {
+    assert_osc52_query(
+        Selection::PRIMARY,
+        ClipboardSelection::PrimarySelection,
+        "\u{1b}]52;p;aGVsbG8=\u{1b}\\",
+    );
+}
+
+#[test]
+fn osc52_waits_for_asynchronous_clipboard() {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let mut term = TestTerm::new_with_writer(5, 10, 0, Box::new(TestOsc52Writer(tx)));
+    let mut clip = TestOsc52Clip::new("delayed");
+    clip.delay = std::time::Duration::from_millis(20);
+    let clip: Arc<dyn Clipboard> = Arc::new(clip);
+    term.set_clipboard(&clip);
+
     term.print(format!(
         "{}",
         OperatingSystemCommand::QuerySelection(Selection::CLIPBOARD)
     ));
-    let result = rx.recv_timeout(std::time::Duration::from_secs(1));
-    assert!(result.is_ok(), "{:?}", result);
+
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("asynchronous OSC 52 response");
     assert_eq!(
-        String::from_utf8_lossy(&result.unwrap()),
-        "\u{1b}]52;c;aGVsbG8=\u{1b}\\"
+        String::from_utf8_lossy(&result),
+        "\u{1b}]52;c;ZGVsYXllZA==\u{1b}\\"
     );
+}
+
+#[test]
+fn osc52_returns_empty_response_when_enabled_read_fails() {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let mut term = TestTerm::new_with_writer(5, 10, 0, Box::new(TestOsc52Writer(tx)));
+    let mut clip = TestOsc52Clip::new("ignored");
+    clip.fail = true;
+    let clip: Arc<dyn Clipboard> = Arc::new(clip);
+    term.set_clipboard(&clip);
+
+    term.print(format!(
+        "{}",
+        OperatingSystemCommand::QuerySelection(Selection::CLIPBOARD)
+    ));
+
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("empty OSC 52 response");
+    assert_eq!(String::from_utf8_lossy(&result), "\u{1b}]52;c;\u{1b}\\");
+}
+
+#[test]
+fn osc52_reading_is_disabled_by_default() {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let mut term =
+        TestTerm::new_with_writer_and_osc52(5, 10, 0, Box::new(TestOsc52Writer(tx)), false);
+    let clip: Arc<dyn Clipboard> = Arc::new(TestOsc52Clip::new("secret"));
+    term.set_clipboard(&clip);
+
+    term.print(format!(
+        "{}",
+        OperatingSystemCommand::QuerySelection(Selection::CLIPBOARD)
+    ));
+
+    assert!(matches!(
+        rx.recv_timeout(std::time::Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
 }
 
 #[test]

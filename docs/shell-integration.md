@@ -196,17 +196,17 @@ printf '\033]52;c;%s\033\\' $(base64 <<< "hello world")
 
 The second parameter provides the selection data, which is a string encoded in base64 (RFC-4648).
 
-## OSC 52 Clipboard Paste
+## OSC 52 Clipboard Query
 
-The data can be pasted from the `System Clipboard` or `Primary Selection` with a
+The data can be read from the `System Clipboard` or `Primary Selection` with a
 command like this:
 
 ```bash
 printf "\033]52;c;?\033\\"
 ```
 
-- `c` pastes from the system clipboard
-- `p` pastes from the primary selection buffer
+- `c` reads from the system clipboard
+- `p` reads from the primary selection buffer
 
 Note that this feature poses a potential security risk and is disabled by
 default. It requires enabling via [a configuration option](config/lua/config/enable_osc52_clipboard_reading.md).

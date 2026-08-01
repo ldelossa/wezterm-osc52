@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>wezterm-gui</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.github.wez.wezterm</string>
+	<string>com.github.ldelossa.wezterm-osc52</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
